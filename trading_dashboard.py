@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, dcc, html
+from plotly.subplots import make_subplots  # <-- add this
 
 from dash.dependencies import Input, Output
 
@@ -65,7 +66,14 @@ col_cash       = find_col(["cash"])
 income_cols = [c for c in [col_dividends, col_cashback, col_interest, col_sharelend] if c]
 
 # === Monthly income amounts ===
-df_income = df[income_cols].copy()
+# Build a dedicated income DataFrame with a COMPLETE monthly index and 0s for missing months
+if income_cols:
+    df_income = df[income_cols].copy()
+    full_income_index = pd.date_range(df.index.min(), df.index.max(), freq="MS")  # month start
+    df_income = df_income.reindex(full_income_index).fillna(0)
+else:
+    df_income = pd.DataFrame()
+
 
 # === Equity drawdown ===
 if col_equity:
@@ -214,9 +222,17 @@ app.layout = html.Div([
             barmode="group",
             hovermode="x unified",
             **dark_layout
+        ).update_yaxes(
+            # Make 0 line very prominent specifically for this graph
+            zeroline=True,
+            zerolinecolor="white",
+            zerolinewidth=3,
+            # Fix spike: Limit y-axis if there's a massive outlier (e.g., > 100%)
+            # We cap visualization at -100% to +100% roughly, or dynamically based on median
+            range=[-35, 35] # Example hard cap, or calculated:
+            # range=[df["Total_PL_pct"].quantile(0.05), df["Total_PL_pct"].quantile(0.95)]
         )
     ),
-
 
 
 
@@ -230,7 +246,7 @@ app.layout = html.Div([
                    hovertemplate="%{y:.2f}€<extra></extra>") if col_realised else None,
             go.Bar(x=df.index, y=df[col_unrealised],
                    name="Unrealised P&L",
-                   marker_color="#8B4513",  # <-- change this color
+                   marker_color="#8B4513",
                    hovertemplate="%{y:.2f}€<extra></extra>") if col_unrealised else None,
             go.Bar(
                 x=df.index,
@@ -271,36 +287,44 @@ app.layout = html.Div([
     # ),
 
 
-    # Replace the previous append with this inside app.layout:
+
+    # Income breakdown as multiple pies per period
     html.Div([
         html.Label("Select Income Aggregation Period:"),
         dcc.Dropdown(
             id="income-period-dropdown",
             options=[
-                {"label": "Monthly", "value": "ME"},
                 {"label": "Quarterly", "value": "QE"},
                 {"label": "6 Months", "value": "6ME"},
-                {"label": "Yearly", "value": "YE"}
+                {"label": "Yearly", "value": "YE"},
             ],
-            value="6ME",  # default 6 months
-            clearable=False
+            value="QE",  # default: quarterly
+            clearable=False,
         ),
-        dcc.Graph(id="income-aggregated")
+        dcc.Graph(id="income-aggregated"),
     ]),
+    # ... existing code ...
 
     # Monthly income (actual amounts)
     dcc.Graph(
         id="income-monthly",
         figure=go.Figure([
-            go.Bar(x=df.index, y=df[c], name=c.replace("_", " "), hovertemplate="%{y:.2f}€<extra></extra>")
+            go.Bar(
+                x=df_income.index,
+                y=df_income[c],
+                name=c.replace("_", " "),
+                hovertemplate="%{y:.2f}€<extra></extra>"
+            )
             for c in income_cols
-        ]).update_layout(barmode="stack",
-                         title="Monthly Income without deposits and selling stock profits (actual amounts)",
-                         xaxis_title="Date",
-                         yaxis_title="Amount (€)",
-                         height=GRAPH_HEIGHT,
-                         dragmode="zoom",
-                         **dark_layout)
+        ]).update_layout(
+            barmode="stack",
+            title="Monthly Income without deposits and selling stock profits (actual amounts)",
+            xaxis_title="Date",
+            yaxis_title="Amount (€)",
+            height=GRAPH_HEIGHT,
+            dragmode="zoom",
+            **dark_layout
+        )
         if income_cols else go.Figure().update_layout(title="Income Breakdown (missing data)")
     ),
 
@@ -342,61 +366,6 @@ app.layout = html.Div([
         )
     ),
 
-    # Cash vs Interest graph
-    # dcc.Graph(
-    #     id="cash-interest",
-    #     figure=go.Figure([
-    #         go.Scatter(
-    #             x=df.index,
-    #             y=df.get(col_cash, pd.Series(np.nan, index=df.index)),
-    #             name="Cash",
-    #             mode="lines+markers",
-    #             hovertemplate="%{y:.2f}€<extra></extra>",
-    #             line=dict(color="#1f77b4"),  # darker blue for dark theme
-    #         ),
-    #         go.Scatter(
-    #             x=df.index,
-    #             y=df.get(col_interest, pd.Series(np.nan, index=df.index)),
-    #             name="Interest on Cash",
-    #             mode="lines+markers",
-    #             hovertemplate="%{y:.2f}€<extra></extra>",
-    #             line=dict(color="#ffa500"),  # darker orange
-    #             yaxis="y2"
-    #         )
-    #     ]).update_layout(
-    #         title="Cash vs Interest on Cash",
-    #         height=GRAPH_HEIGHT,
-    #         xaxis=dict(
-    #             title="Date",
-    #             color="#d0d0d0",
-    #             tickangle=45,
-    #             gridcolor="#444444",
-    #             zerolinecolor="#444444",
-    #             tickformat="%b-%y",
-    #             dtick="M1",
-    #             range=[x_min, x_max],
-    #             fixedrange=False
-    #         ),
-    #         yaxis=dict(
-    #             title="Cash (€)",
-    #             color="#d0d0d0",
-    #             gridcolor="#444444",
-    #             zerolinecolor="#444444"
-    #         ),
-    #         yaxis2=dict(
-    #             title="Interest (€)",
-    #             overlaying="y",
-    #             side="right",
-    #             color="#ffa500",
-    #             gridcolor="#444444",
-    #             zerolinecolor="#444444"
-    #         ),
-    #         hovermode="x unified",
-    #         plot_bgcolor="#2e2e2e",
-    #         paper_bgcolor="#2e2e2e",
-    #         font=dict(family="JetBrains Mono, monospace", color="#d0d0d0", size=12)
-    #     )
-    # ),
 
     # New Graph: Commissions and Fees
     dcc.Graph(
@@ -411,7 +380,6 @@ app.layout = html.Div([
             **dark_layout
         )
     ),
-
 ])
 
 @app.callback(
@@ -420,22 +388,77 @@ app.layout = html.Div([
 )
 def update_income_graph(period):
     if not income_cols:
-        return go.Figure().update_layout(title="Income Breakdown (missing data)")
+        return go.Figure().update_layout(
+            title="Income Breakdown (missing data)",
+            height=600,
+            **dark_layout
+        )
 
-    # Resample & sum for selected period
-    df_agg = df[income_cols].resample(period).sum()
+    # Map dropdown values to pandas resample frequencies
+    freq_map = {
+        "QE": "Q",    # Quarterly
+        "6ME": "6M",  # 6 months
+        "YE": "Y",    # Yearly
+    }
+    freq = freq_map.get(period, "Q")
 
-    fig = go.Figure([
-        go.Bar(x=df_agg.index, y=df_agg[c], name=c.replace("_", " "), hovertemplate="%{y:.2f}€<extra></extra>")
-        for c in income_cols
-    ])
+    # Aggregate income by selected period
+    df_agg = df_income.resample(freq).sum()
+
+    if df_agg.empty:
+        return go.Figure().update_layout(
+            title="Income Breakdown (no data for selected period)",
+            height=600,
+            **dark_layout
+        )
+
+    n_periods = len(df_agg.index)
+    # Safety: avoid rendering absurdly many pies
+    if n_periods > 8:
+        df_agg = df_agg.tail(8)
+        n_periods = len(df_agg.index)
+
+    # Nice labels per period (e.g. "Q1 2024", "2024", "2024-01–2024-06", etc.)
+    period_labels = []
+    for idx in df_agg.index:
+        if freq == "Q":
+            period_labels.append(f"Q{idx.quarter} {idx.year}")
+        elif freq == "Y":
+            period_labels.append(str(idx.year))
+        else:  # 6M or other
+            start = idx.strftime("%b %Y")
+            end = (idx + pd.offsets.MonthEnd(5)).strftime("%b %Y")
+            period_labels.append(f"{start} – {end}")
+
+    fig = make_subplots(
+        rows=1,
+        cols=n_periods,
+        specs=[[{"type": "domain"}] * n_periods],
+        subplot_titles=period_labels,
+    )
+
+    for i, (idx, row) in enumerate(df_agg.iterrows(), start=1):
+        fig.add_trace(
+            go.Pie(
+                labels=[c.replace("_", " ") for c in income_cols],
+                values=row[income_cols],
+                name=period_labels[i - 1],
+                hovertemplate="%{label}: %{value:.2f}€ (%{percent})<extra></extra>",
+                textinfo="percent",
+            ),
+            row=1,
+            col=i,
+        )
+
+    # Use dark_layout but drop its legend to avoid conflict
+    layout_no_legend = {k: v for k, v in dark_layout.items() if k != "legend"}
+
     fig.update_layout(
-        title=f"Income Breakdown Aggregated ({period})",
-        barmode="stack",
-        xaxis_title="Date",
-        yaxis_title="Amount (€)",
-        height=GRAPH_HEIGHT,
-        **dark_layout
+        title="Income Breakdown per Period",
+        height=600,
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.1),
+        **layout_no_legend,
     )
     return fig
 
