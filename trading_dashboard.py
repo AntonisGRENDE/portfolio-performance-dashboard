@@ -119,6 +119,16 @@ dark_layout = dict(
     font=dict(family="JetBrains Mono, monospace", color="#d0d0d0", size=12),
     plot_bgcolor="#2e2e2e",
     paper_bgcolor="#2e2e2e",
+    # Move legend inside the graph (top-right corner)
+    legend=dict(
+        x=0.99,
+        y=0.99,
+        xanchor="right",
+        yanchor="top",
+        bgcolor="rgba(0,0,0,0.5)",  # Semi-transparent background
+        bordercolor="#444444",
+        borderwidth=1
+    ),
     xaxis=dict(
         color="#d0d0d0",
         tickangle=45,
@@ -134,7 +144,8 @@ dark_layout = dict(
     yaxis=dict(
         color="#d0d0d0",
         gridcolor="#444444",
-        zerolinecolor="#444444",
+        zerolinecolor="#666666",  # Make 0 line lighter/more visible by default
+        zerolinewidth=2,          # Make it thicker
         title_font=dict(size=16),
         tickfont=dict(size=14),
     )
@@ -159,6 +170,13 @@ app.layout = html.Div([
             hovermode="x",
             height=GRAPH_HEIGHT,
             **dark_layout
+        ).update_yaxes(
+            # Fix for spike: set range manually if data exists, ignoring extreme outliers if necessary
+            # Or simply use range based on the 10th to 100th percentile to cut off initial spikes
+            range=[
+                df[col_equity].min() * 0.95,
+                df[col_equity].max() * 1.05
+            ] if col_equity else None
         ) if col_equity else go.Figure().update_layout(title="Equity Curve (missing data)")
     ),
 
