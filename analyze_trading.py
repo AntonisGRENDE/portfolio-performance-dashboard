@@ -1,10 +1,12 @@
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 
 # === CONFIG ===
-excel_file = r"C:\Users\anton\Downloads\try\Trading121 monthly statements december 2023-december 2024.xlsx"
+BASE_DIR = Path(__file__).resolve().parent
+excel_file = BASE_DIR / "Trading121 monthly statements december 2023-december 2024.xlsx"
 date_range = ("2023-10-01", "2025-08-31")
 IMG_SIZE = (16, 9)
 DPI = 400

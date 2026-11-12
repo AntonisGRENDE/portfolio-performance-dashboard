@@ -7,6 +7,7 @@ Dependencies:
 Run:   python trading_dashboard.py            (uses the path in EXCEL_FILE)
        python trading_dashboard.py "C:\\path\\to\\statements.xlsx"
 """
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -17,9 +18,9 @@ import dash_bootstrap_components as dbc
 from plotly.subplots import make_subplots
 
 # =============================================================== CONFIG
-EXCEL_FILE = sys.argv[1] if len(sys.argv) > 1 else (
-    r"C:\Users\anton\Downloads\try\Trading121 monthly statements december 2023-december 2024.xlsx"
-)
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_EXCEL_FILE = BASE_DIR / "Trading121 monthly statements december 2023-december 2024.xlsx"
+EXCEL_FILE = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXCEL_FILE
 START_DATE = "2023-10-01"
 GRAPH_HEIGHT = 520
 
