@@ -13,12 +13,16 @@ CURRENCY = "€"   # change to "$" if USD account
 # === LOAD & CLEAN DATA ===
 df_raw = pd.read_excel(excel_file, header=0)
 
+# Drop rows where metric name is missing to prevent duplicate NaN columns
+df_raw = df_raw.dropna(subset=[df_raw.columns[0]])
+
 # First column = metrics
 df = df_raw.set_index(df_raw.columns[0]).T
 
 # Now the index are months, columns are metrics
-df.index = pd.to_datetime(df.index, format="%b-%y", errors="coerce")
-df.columns = [str(c).strip().replace(":", "").replace("/", "_").replace(" ", "_") for c in df.columns]
+df.index = pd.to_datetime(df.index, errors="coerce")
+df = df[df.index.notna()]
+df.columns = ["_".join(str(c).strip().replace(":", "").replace("/", "_").split()) for c in df.columns]
 
 # Clean values
 for col in df.columns:
@@ -141,4 +145,4 @@ if "Realised_PL" in df.columns:
     plt.savefig("pl_heatmap.png", dpi=DPI, bbox_inches="tight")
     plt.close()
 
-print("✅ High-resolution (4K) charts with detailed axes and new insights saved.")
+print("High-resolution (4K) charts with detailed axes and new insights saved.")
