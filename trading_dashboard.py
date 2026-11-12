@@ -1,5 +1,8 @@
 """
-Trading dashboard (Dash + Plotly) - improved version.
+Trading dashboard (Dash + Plotly) - improved version with dash-bootstrap-components.
+
+Dependencies:
+    pip install dash dash-bootstrap-components pandas plotly openpyxl
 
 Run:   python trading_dashboard.py            (uses the path in EXCEL_FILE)
        python trading_dashboard.py "C:\\path\\to\\statements.xlsx"
@@ -10,6 +13,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output
+import dash_bootstrap_components as dbc
 from plotly.subplots import make_subplots
 
 # =============================================================== CONFIG
@@ -117,6 +121,20 @@ x_min, x_max = idx.min(), idx.max()
 XRANGE = [(x_min - pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
           (x_max + pd.Timedelta(days=20)).strftime("%Y-%m-%d")]
 
+RANGESELECTOR = dict(
+    buttons=[
+        dict(count=3, label="3M", step="month", stepmode="backward"),
+        dict(count=6, label="6M", step="month", stepmode="backward"),
+        dict(count=1, label="1Y", step="year", stepmode="backward"),
+        dict(step="all", label="All"),
+    ],
+    bgcolor="rgba(46, 46, 46, 0.7)",
+    activecolor=C["blue"],
+    font=dict(family=FONT, size=11, color="#e0e0e0"),
+    bordercolor="#555555",
+    borderwidth=1,
+)
+
 
 # =============================================================== STYLE HELPERS
 def style(fig, title, ytitle=None, height=GRAPH_HEIGHT, time_axis=True, hovermode="x unified"):
@@ -135,7 +153,8 @@ def style(fig, title, ytitle=None, height=GRAPH_HEIGHT, time_axis=True, hovermod
     fig.update_yaxes(gridcolor=GRID, zerolinecolor="#888888", zerolinewidth=1.5)
     if time_axis:
         fig.update_xaxes(tickformat="%b-%y", dtick="M2", tickangle=-45, range=XRANGE,
-                         showspikes=True, spikemode="across", spikethickness=1, spikecolor="#888888")
+                         showspikes=True, spikemode="across", spikethickness=1, spikecolor="#888888",
+                         rangeslider=dict(visible=False))
     if ytitle:
         fig.update_yaxes(title_text=ytitle)
     return fig
@@ -161,6 +180,8 @@ def fig_equity():
     fig.add_trace(go.Bar(x=idx, y=cum_profit, name="Cumulative P/L (equity − net deposits)",
                          marker_color=bar_colors(cum_profit), hovertemplate=EUR), 2, 1)
     style(fig, "Equity vs money you put in")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False), row=1, col=1)
+    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08, bgcolor="#242424", bordercolor="#444444"), row=2, col=1)
     fig.update_yaxes(title_text="Equity (€)", row=1, col=1)
     fig.update_yaxes(title_text="Cum. P/L (€)", row=2, col=1)
     return fig
@@ -173,6 +194,7 @@ def fig_returns():
     fig.add_trace(go.Scatter(x=idx, y=cum_ret * 100, name="Cumulative return", mode="lines+markers",
                              line=dict(color=C["gold"], width=3), hovertemplate=PCT), secondary_y=True)
     style(fig, "Returns excluding deposits/withdrawals")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False))
     fig.update_yaxes(title_text="Monthly (%)", secondary_y=False)
     fig.update_yaxes(title_text="Cumulative (%)", secondary_y=True, showgrid=False)
     return fig
@@ -185,6 +207,7 @@ def fig_cashflows():
     fig.add_trace(go.Scatter(x=idx, y=net_dep, name="Cumulative net deposits", mode="lines",
                              line=dict(color=C["orange"], width=3), hovertemplate=EUR), secondary_y=True)
     style(fig, "Deposits & withdrawals")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False))
     fig.update_yaxes(title_text="Monthly (€)", secondary_y=False)
     fig.update_yaxes(title_text="Cumulative (€)", secondary_y=True, showgrid=False)
     return fig
@@ -200,7 +223,6 @@ def fig_pl():
                              marker_color=C["brown"], hovertemplate=EUR), secondary_y=False)
     fig.add_trace(go.Bar(x=idx, y=df["Total_PL"], name="Total P&L",
                          marker_color=C["teal"], hovertemplate=EUR), secondary_y=False)
-    # assumes the statement's P&L columns are per-month amounts (as your original chart implied)
     fig.add_trace(go.Scatter(x=idx, y=df["Total_PL"].fillna(0).cumsum(), name="Cumulative total P&L",
                              line=dict(color=C["gold"], width=3), hovertemplate=EUR), secondary_y=True)
     style(fig, "Realised vs unrealised vs total P&L")
@@ -238,6 +260,98 @@ def fig_distribution():
     return fig
 
 
+def fig_best_worst():
+    r = ret.iloc[1:] * 100
+    t = pd.DataFrame({"year": r.index.year, "month": r.index.strftime("%b"), "r": r.values})
+    counts = t.groupby("year")["r"].count()
+    valid_years = counts[counts >= 2].index
+    t = t[t["year"].isin(valid_years)]
+    if t.empty:
+        return empty_fig("Best & worst month per year (not enough data)")
+
+    best = t.loc[t.groupby("year")["r"].idxmax()].set_index("year").sort_index()
+    worst = t.loc[t.groupby("year")["r"].idxmin()].set_index("year").sort_index()
+    years = [str(y) for y in best.index]
+
+    def trace(d, name, color):
+        return go.Bar(
+            x=years, y=d["r"], name=name, marker_color=color,
+            text=[f"{m}<br>{v:+.1f}%" for m, v in zip(d["month"], d["r"])],
+            textposition="outside", cliponaxis=False,
+            hovertemplate="%{x} · " + name + ": %{y:.2f}%<extra></extra>")
+
+    fig = go.Figure([trace(best, "Best month", C["green"]),
+                     trace(worst, "Worst month", C["red"])])
+    style(fig, "Best & worst month per year", ytitle="Return (%)",
+          time_axis=False, hovermode="closest", height=360)
+    fig.update_layout(barmode="group")
+    fig.update_xaxes(type="category")
+    return fig
+
+
+def table_best_worst():
+    r = ret.iloc[1:] * 100
+    t = pd.DataFrame({"year": r.index.year, "month": r.index.strftime("%b"), "r": r.values, "date": r.index})
+    counts = t.groupby("year")["r"].count()
+    valid_years = counts[counts >= 2].index
+    t = t[t["year"].isin(valid_years)]
+    if t.empty:
+        return html.Div("No years with at least 2 months of data.", className="text-muted text-center py-2")
+
+    best = t.loc[t.groupby("year")["r"].idxmax()].set_index("year").sort_index()
+    worst = t.loc[t.groupby("year")["r"].idxmin()].set_index("year").sort_index()
+
+    header = html.Thead(
+        html.Tr([
+            html.Th("Year", style={"textAlign": "center"}),
+            html.Th("Best month", style={"textAlign": "center", "color": C["green"]}),
+            html.Th("Best %", style={"textAlign": "right", "color": C["green"]}),
+            html.Th("Best P&L (€)", style={"textAlign": "right", "color": C["green"]}),
+            html.Th("Worst month", style={"textAlign": "center", "color": C["red"]}),
+            html.Th("Worst %", style={"textAlign": "right", "color": C["red"]}),
+            html.Th("Worst P&L (€)", style={"textAlign": "right", "color": C["red"]}),
+        ]),
+        style={"backgroundColor": "#242424", "borderBottom": "2px solid #555"}
+    )
+
+    rows = []
+    has_total_pl = "Total_PL" in df.columns
+    for y in sorted(best.index):
+        b_row = best.loc[y]
+        w_row = worst.loc[y]
+
+        b_pl = df.loc[b_row["date"], "Total_PL"] if has_total_pl and b_row["date"] in df.index else np.nan
+        w_pl = df.loc[w_row["date"], "Total_PL"] if has_total_pl and w_row["date"] in df.index else np.nan
+
+        b_pl_str = f"{b_pl:+,.2f} €" if pd.notna(b_pl) else "–"
+        w_pl_str = f"{w_pl:+,.2f} €" if pd.notna(w_pl) else "–"
+
+        rows.append(html.Tr([
+            html.Td(str(y), style={"textAlign": "center", "fontWeight": "bold"}),
+            html.Td(b_row["month"], style={"textAlign": "center", "color": C["green"]}),
+            html.Td(f"{b_row['r']:+.2f}%", style={"textAlign": "right", "color": C["green"], "fontWeight": "bold"}),
+            html.Td(b_pl_str, style={"textAlign": "right", "color": C["green"]}),
+            html.Td(w_row["month"], style={"textAlign": "center", "color": C["red"]}),
+            html.Td(f"{w_row['r']:+.2f}%", style={"textAlign": "right", "color": C["red"], "fontWeight": "bold"}),
+            html.Td(w_pl_str, style={"textAlign": "right", "color": C["red"]}),
+        ]))
+
+    return dbc.Table(
+        [header, html.Tbody(rows)],
+        bordered=True,
+        hover=True,
+        responsive=True,
+        className="mb-4",
+        style={
+            "backgroundColor": "#2e2e2e",
+            "color": "#d0d0d0",
+            "fontFamily": FONT,
+            "fontSize": "13px",
+            "borderColor": "#444444",
+        }
+    )
+
+
 def fig_rolling():
     r3 = ((1 + ret).rolling(3).apply(np.prod, raw=True) - 1) * 100
     r6 = ((1 + ret).rolling(6).apply(np.prod, raw=True) - 1) * 100
@@ -245,7 +359,9 @@ def fig_rolling():
         go.Scatter(x=idx, y=r3, name="Rolling 3M", line=dict(color=C["blue"], width=2), hovertemplate=PCT),
         go.Scatter(x=idx, y=r6, name="Rolling 6M", line=dict(color=C["orange"], width=2), hovertemplate=PCT),
     ])
-    return style(fig, "Rolling returns", ytitle="Return (%)")
+    style(fig, "Rolling returns", ytitle="Return (%)")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False))
+    return fig
 
 
 def fig_income_monthly():
@@ -303,16 +419,24 @@ def fig_drawdown():
                    line=dict(color=C["red"], width=3), fill="tozeroy",
                    fillcolor="rgba(231,76,60,0.20)", hovertemplate=PCT),
     ])
-    return style(fig, "Drawdown: raw equity vs performance only", ytitle="Drawdown (%)")
+    style(fig, "Drawdown: raw equity vs performance only", ytitle="Drawdown (%)")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False))
+    return fig
 
 
 # =============================================================== KPIs
 def kpi(label, value, color="#d0d0d0"):
-    return html.Div([
-        html.Div(label, style={"fontSize": "12px", "color": "#9AA0A6"}),
-        html.Div(value, style={"fontSize": "22px", "fontWeight": "bold", "color": color}),
-    ], style={"background": "#3a3a3a", "padding": "12px 18px", "borderRadius": "8px",
-              "minWidth": "150px", "flex": "1"})
+    return dbc.Col(
+        dbc.Card(
+            dbc.CardBody([
+                html.Div(label, style={"fontSize": "12px", "color": "#9AA0A6", "whiteSpace": "nowrap"}),
+                html.Div(value, style={"fontSize": "20px", "fontWeight": "bold", "color": color, "whiteSpace": "nowrap"}),
+            ], className="p-2 text-center"),
+            style={"backgroundColor": "#3a3a3a", "border": "1px solid #444", "borderRadius": "8px"},
+            className="h-100",
+        ),
+        xs=6, md=4, xl=True, className="h-100"
+    )
 
 
 def signed_color(v):
@@ -321,7 +445,7 @@ def signed_color(v):
 
 r_m = ret.iloc[1:]
 total_profit = cum_profit.iloc[-1]
-kpis = html.Div([
+kpis = dbc.Row([
     kpi("Current equity", f"{equity.iloc[-1]:,.0f} €"),
     kpi("Net deposited", f"{net_dep.iloc[-1]:,.0f} €"),
     kpi("Profit / loss", f"{total_profit:+,.0f} €", signed_color(total_profit)),
@@ -331,10 +455,10 @@ kpis = html.Div([
     kpi("Worst month", f"{r_m.min() * 100:+.1f}% ({r_m.idxmin():%b-%y})", C["red"]),
     kpi("Win rate", f"{(r_m > 0).mean() * 100:.0f}% of months"),
     kpi("Income / Fees", f"{income_total.sum():,.0f} € / {fees_abs.sum():,.0f} €"),
-], style={"display": "flex", "flexWrap": "wrap", "gap": "12px", "marginBottom": "18px"})
+], className="g-2 mb-3")
 
 
-# =============================================================== LAYOUT
+# =============================================================== LAYOUT HELPERS
 def graph(fig, gid=None):
     kw = {"id": gid} if gid else {}
     h = GRAPH_HEIGHT
@@ -360,62 +484,212 @@ def graph(fig, gid=None):
 
 def row(*figs):
     n = len(figs) or 1
-    max_w = f"calc({100 / n:.2f}% - {(16 * (n - 1)) / n:.1f}px)"
-    return html.Div(
-        [html.Div(
-            graph(f),
-            style={
-                "flex": "1 1 0",
-                "minWidth": "0",
-                "minHeight": "0",
-                "maxWidth": max_w,
-                "overflow": "hidden",
-                "boxSizing": "border-box",
-            }
-        ) for f in figs],
-        style={"display": "flex", "gap": "16px", "width": "100%", "maxWidth": "100%",
-               "overflow": "hidden", "boxSizing": "border-box"}
+    col_width = 12 // n
+    return dbc.Row(
+        [dbc.Col(graph(f), xs=12, md=col_width) for f in figs],
+        className="g-3"
     )
 
 
-TAB = dict(backgroundColor=BG, color="#d0d0d0", border="1px solid #444", padding="10px")
-TAB_SEL = dict(backgroundColor="#3a3a3a", color="white", border="1px solid #444",
-               borderTop=f"3px solid {C['blue']}", padding="10px")
+CUSTOM_CSS = """
+body {
+    background-color: #1f1f1f !important;
+    color: #d0d0d0 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+.card {
+    background-color: #2e2e2e !important;
+    border-color: #444444 !important;
+}
+.nav-tabs .nav-link {
+    color: #9AA0A6 !important;
+    background-color: #282828 !important;
+    border-color: #444444 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    margin-right: 4px;
+}
+.nav-tabs .nav-link:hover {
+    color: #ffffff !important;
+    border-color: #555555 !important;
+}
+.nav-tabs .nav-link.active {
+    color: #ffffff !important;
+    background-color: #2e2e2e !important;
+    border-top: 3px solid #4C9BE8 !important;
+    border-color: #444444 #444444 #2e2e2e !important;
+    font-weight: 600;
+}
+.form-select, .form-control {
+    background-color: #2e2e2e !important;
+    color: #ffffff !important;
+    border-color: #555555 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+.form-select:focus, .form-control:focus {
+    border-color: #4C9BE8 !important;
+    box-shadow: 0 0 0 0.25rem rgba(76, 155, 232, 0.25) !important;
+}
+.form-check-input:checked {
+    background-color: #4C9BE8 !important;
+    border-color: #4C9BE8 !important;
+}
+.form-check-label {
+    color: #d0d0d0 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+.table {
+    --bs-table-bg: #2e2e2e !important;
+    --bs-table-striped-bg: #343434 !important;
+    --bs-table-hover-bg: #383838 !important;
+    --bs-table-color: #d0d0d0 !important;
+    border-color: #444444 !important;
+}
+"""
 
-
-def tab(label, children):
-    return dcc.Tab(label=label, children=children, style=TAB, selected_style=TAB_SEL)
-
-
-app = Dash(__name__)
+app = Dash(
+    __name__,
+    external_stylesheets=[
+        dbc.themes.CYBORG,
+        "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap",
+    ],
+)
 app.title = "Trading dashboard"
+app.index_string = f"""<!DOCTYPE html>
+<html>
+    <head>
+        {{%metas%}}
+        <title>{{%title%}}</title>
+        {{%favicon%}}
+        {{%css%}}
+        <style>
+{CUSTOM_CSS}
+        </style>
+    </head>
+    <body>
+        {{%app_entry%}}
+        <footer>
+            {{%config%}}
+            {{%scripts%}}
+            {{%renderer%}}
+        </footer>
+    </body>
+</html>"""
 
-app.layout = html.Div([
-    html.H2("Trading dashboard", style={"margin": "0 0 14px 0"}),
+header = dbc.Row([
+    dbc.Col(
+        html.H2("Trading dashboard", className="mb-0", style={"fontWeight": "600"}),
+        xs=12, sm=7, md=8, className="d-flex align-items-center"
+    ),
+    dbc.Col(
+        html.Span(
+            f"Data: {idx.min():%b-%y} → {idx.max():%b-%y}",
+            className="text-muted",
+            style={"fontSize": "14px", "fontFamily": FONT}
+        ),
+        xs=12, sm=5, md=4, className="d-flex align-items-center justify-content-sm-end mt-2 mt-sm-0"
+    ),
+], className="mb-3 pb-2 border-bottom border-secondary", align="center")
+
+income_controls = html.Div([
+    html.Label("Period:", className="me-2 text-muted fw-bold", style={"fontFamily": FONT}),
+    dbc.Select(
+        id="income-period",
+        value="Q",
+        options=[
+            {"label": "Quarterly", "value": "Q"},
+            {"label": "Half-yearly", "value": "H"},
+            {"label": "Yearly", "value": "Y"},
+        ],
+        style={"width": "180px"},
+        className="me-4",
+    ),
+    dbc.RadioItems(
+        id="income-mode",
+        value="amount",
+        inline=True,
+        options=[
+            {"label": " Amount (€)", "value": "amount"},
+            {"label": " Share (%)", "value": "share"},
+        ],
+        className="d-flex align-items-center",
+        inputClassName="me-1",
+        labelClassName="me-3 text-light",
+    ),
+], className="d-flex align-items-center my-3 p-2 rounded", style={"backgroundColor": "#282828", "border": "1px solid #444"})
+
+app.layout = dbc.Container([
+    header,
     kpis,
-    dcc.Tabs(children=[
-        tab("Overview", [graph(fig_equity()), graph(fig_returns()), graph(fig_cashflows())]),
-        tab("Performance", [graph(fig_pl()), row(fig_heatmap(), fig_distribution()), graph(fig_rolling())]),
-        tab("Income", [
-            graph(fig_income_monthly()),
-            html.Div([
-                html.Label("Period:", style={"marginRight": "8px"}),
-                dcc.Dropdown(id="income-period", clearable=False, value="Q", style={"width": "180px", "color": "#000"},
-                             options=[{"label": "Quarterly", "value": "Q"},
-                                      {"label": "Half-yearly", "value": "H"},
-                                      {"label": "Yearly", "value": "Y"}]),
-                dcc.RadioItems(id="income-mode", value="amount", inline=True,
-                               options=[{"label": " Amount (€)", "value": "amount"},
-                                        {"label": " Share (%)", "value": "share"}],
-                               style={"marginLeft": "24px"}, inputStyle={"marginLeft": "14px"}),
-            ], style={"display": "flex", "alignItems": "center", "margin": "10px 0"}),
-            graph(None, gid="income-aggregated"),
-        ]),
-        tab("Costs & cash", [graph(fig_costs()), graph(fig_cash())]),
-        tab("Risk", [graph(fig_drawdown())]),
-    ], colors=dict(border="#444", primary=C["blue"], background=BG)),
-], style={"background": "#1f1f1f", "color": "#d0d0d0", "fontFamily": FONT, "padding": "20px",
-          "boxSizing": "border-box", "maxWidth": "100%", "overflowX": "hidden"})
+    dbc.Tabs([
+        dbc.Tab(
+            dcc.Loading(
+                type="circle",
+                color=C["blue"],
+                children=html.Div([
+                    graph(fig_equity()),
+                    graph(fig_returns()),
+                    graph(fig_cashflows()),
+                ], className="pt-3")
+            ),
+            label="Overview",
+        ),
+        dbc.Tab(
+            dcc.Loading(
+                type="circle",
+                color=C["blue"],
+                children=html.Div([
+                    graph(fig_pl()),
+                    row(fig_heatmap(), fig_distribution()),
+                    graph(fig_best_worst()),
+                    table_best_worst(),
+                    graph(fig_rolling()),
+                ], className="pt-3")
+            ),
+            label="Performance",
+        ),
+        dbc.Tab(
+            dcc.Loading(
+                type="circle",
+                color=C["blue"],
+                children=html.Div([
+                    graph(fig_income_monthly()),
+                    income_controls,
+                    graph(None, gid="income-aggregated"),
+                ], className="pt-3")
+            ),
+            label="Income",
+        ),
+        dbc.Tab(
+            dcc.Loading(
+                type="circle",
+                color=C["blue"],
+                children=html.Div([
+                    graph(fig_costs()),
+                    graph(fig_cash()),
+                ], className="pt-3")
+            ),
+            label="Costs & cash",
+        ),
+        dbc.Tab(
+            dcc.Loading(
+                type="circle",
+                color=C["blue"],
+                children=html.Div([
+                    graph(fig_drawdown()),
+                ], className="pt-3")
+            ),
+            label="Risk",
+        ),
+    ], className="mb-3"),
+], fluid=True, style={
+    "backgroundColor": "#1f1f1f",
+    "color": "#d0d0d0",
+    "fontFamily": FONT,
+    "minHeight": "100vh",
+    "padding": "20px",
+    "maxWidth": "100%",
+    "overflowX": "hidden",
+})
 
 
 # =============================================================== CALLBACK
