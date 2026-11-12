@@ -120,12 +120,14 @@ XRANGE = [(x_min - pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
 
 # =============================================================== STYLE HELPERS
 def style(fig, title, ytitle=None, height=GRAPH_HEIGHT, time_axis=True, hovermode="x unified"):
+    t_margin = 60 if height <= 350 else 100
+    b_margin = 40 if height <= 350 else 70
     fig.update_layout(
         template="plotly_dark",
         title=dict(text=title, x=0.01, xanchor="left", y=0.96, yanchor="top", font=dict(size=18)),
         font=dict(family=FONT, color="#d0d0d0", size=12),
         paper_bgcolor=BG, plot_bgcolor=BG, height=height,
-        margin=dict(l=70, r=40, t=100, b=70), hovermode=hovermode,
+        margin=dict(l=70, r=40, t=t_margin, b=b_margin), hovermode=hovermode,
         legend=dict(orientation="h", x=1, xanchor="right", y=1.04, yanchor="bottom",
                     bgcolor="rgba(0,0,0,0)"),
     )
@@ -335,12 +337,45 @@ kpis = html.Div([
 # =============================================================== LAYOUT
 def graph(fig, gid=None):
     kw = {"id": gid} if gid else {}
-    return dcc.Graph(figure=fig, config={"displaylogo": False}, style={"marginBottom": "18px"}, **kw)
+    h = GRAPH_HEIGHT
+    if fig is not None:
+        try:
+            h = fig.layout.height or GRAPH_HEIGHT
+        except Exception:
+            pass
+    return dcc.Graph(
+        figure=fig,
+        responsive=True,
+        config={"displaylogo": False, "responsive": True},
+        style={
+            "height": f"{h}px",
+            "width": "100%",
+            "minWidth": "0",
+            "maxWidth": "100%",
+            "marginBottom": "18px",
+        },
+        **kw
+    )
 
 
 def row(*figs):
-    return html.Div([html.Div(graph(f), style={"flex": "1", "minWidth": "0"}) for f in figs],
-                    style={"display": "flex", "gap": "16px"})
+    n = len(figs) or 1
+    max_w = f"calc({100 / n:.2f}% - {(16 * (n - 1)) / n:.1f}px)"
+    return html.Div(
+        [html.Div(
+            graph(f),
+            style={
+                "flex": "1 1 0",
+                "minWidth": "0",
+                "minHeight": "0",
+                "maxWidth": max_w,
+                "overflow": "hidden",
+                "boxSizing": "border-box",
+            }
+        ) for f in figs],
+        style={"display": "flex", "gap": "16px", "width": "100%", "maxWidth": "100%",
+               "overflow": "hidden", "boxSizing": "border-box"}
+    )
 
 
 TAB = dict(backgroundColor=BG, color="#d0d0d0", border="1px solid #444", padding="10px")
@@ -374,12 +409,13 @@ app.layout = html.Div([
                                         {"label": " Share (%)", "value": "share"}],
                                style={"marginLeft": "24px"}, inputStyle={"marginLeft": "14px"}),
             ], style={"display": "flex", "alignItems": "center", "margin": "10px 0"}),
-            dcc.Graph(id="income-aggregated", config={"displaylogo": False}),
+            graph(None, gid="income-aggregated"),
         ]),
         tab("Costs & cash", [graph(fig_costs()), graph(fig_cash())]),
         tab("Risk", [graph(fig_drawdown())]),
     ], colors=dict(border="#444", primary=C["blue"], background=BG)),
-], style={"background": "#1f1f1f", "color": "#d0d0d0", "fontFamily": FONT, "padding": "20px"})
+], style={"background": "#1f1f1f", "color": "#d0d0d0", "fontFamily": FONT, "padding": "20px",
+          "boxSizing": "border-box", "maxWidth": "100%", "overflowX": "hidden"})
 
 
 # =============================================================== CALLBACK
