@@ -36,7 +36,8 @@ import dash_bootstrap_components as dbc
 from plotly.subplots import make_subplots
 
 from trading_data import (build_portfolio, fnum, mdiff,
-                          INCOME_LABELS, FEE_LABELS, NW_LABELS, CF_LABELS, MONTHLY_NAMES)
+                          INCOME_LABELS, FEE_LABELS, NW_LABELS, CF_LABELS, MONTHLY_NAMES,
+                          DEFAULT_CONTRIBUTION)
 
 # =============================================================== CONFIG  (the only block you normally edit)
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,13 +60,15 @@ GRAPH_HEIGHT = 520
 RISK_FREE_ANNUAL = 0.02     # used for Sharpe / Sortino / cash drag. Set to your cash/T-bill rate.
 N_SIMS = 3000               # Monte-Carlo paths in the Projection tab
 MIN_PROJECTION_MONTHS = 6   # the projection needs at least this many monthly returns
+DEFAULT_CONTRIBUTION = 300  # suggested monthly deposit in the Projection tab
 # Is the "unrealised" row a month-end BALANCE of open-position P&L (True), a monthly FLOW (False),
 # or should the script decide by reconciling against the equity curve (None)?
 UNREALISED_IS_BALANCE = None
 
 # =============================================================== LOAD DATA (all maths happens in trading_data.py)
 P = build_portfolio(EXCEL_FILE, start_date=START_DATE, risk_free_annual=RISK_FREE_ANNUAL,
-                    unrealised_is_balance=UNREALISED_IS_BALANCE)
+                    unrealised_is_balance=UNREALISED_IS_BALANCE,
+                    default_contribution=DEFAULT_CONTRIBUTION)
 PF = P.perf          # shorthand: flow-adjusted performance of the Trading212 account
 idx = P.idx          # month-start timestamps shared by every chart
 

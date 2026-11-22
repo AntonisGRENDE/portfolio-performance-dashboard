@@ -71,6 +71,8 @@ MONTHLY_NAMES = {"month": "Month", "equity": "Equity €", "deposits": "Deposit 
                  "cash_pct": "Cash %", "net_worth": "Net worth € (all accounts)",
                  "cash_flow": "Cash flow €", "spending": "Spending €", "polivios": "Polivios value €"}
 
+DEFAULT_CONTRIBUTION = 300  # suggested monthly deposit for the Projection tab
+
 
 # =============================================================== SMALL HELPERS
 def norm(label) -> str:
@@ -294,7 +296,8 @@ class Portfolio:
     attribution (where profit came from) | nw_* (net worth) | cf_* (cash flow) | poli_* (Polivios) | insights.
     """
 
-    def __init__(self, wide, mapping, unmatched, *, risk_free_annual, unrealised_is_balance):
+    def __init__(self, wide, mapping, unmatched, *, risk_free_annual, unrealised_is_balance,
+                 default_contribution=DEFAULT_CONTRIBUTION):
         self.raw, self.mapping, self.unmatched = wide, mapping, unmatched
         self.idx = wide.index
         self.risk_free_annual = risk_free_annual
@@ -309,8 +312,7 @@ class Portfolio:
         x_min, x_max = self.idx.min(), self.idx.max()
         self.x_range = [(x_min - pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
                         (x_max + pd.Timedelta(days=20)).strftime("%Y-%m-%d")]
-        pos = flows.iloc[1:][flows.iloc[1:] > 0]       # suggested monthly deposit for the Projection tab
-        self.default_contribution = int(round(pos.mean(), -1)) if len(pos) else 0
+        self.default_contribution = default_contribution
         self.insights = build_insights(self)
 
     # ---- access helpers --------------------------------------------------------------
@@ -577,11 +579,13 @@ def build_insights(p: Portfolio):
 
 
 # =============================================================== ENTRY POINT
-def build_portfolio(path, start_date="2023-10-01", risk_free_annual=0.02, unrealised_is_balance=None) -> Portfolio:
+def build_portfolio(path, start_date="2023-10-01", risk_free_annual=0.02, unrealised_is_balance=None,
+                    default_contribution=DEFAULT_CONTRIBUTION) -> Portfolio:
     """Read the workbook and return a fully computed Portfolio.
     start_date            ignore statement months before this date
     risk_free_annual      cash / T-bill rate used for Sharpe, Sortino and the cash-drag estimate
-    unrealised_is_balance True = month-end balance, False = monthly flow, None = detect automatically"""
+    unrealised_is_balance True = month-end balance, False = monthly flow, None = detect automatically
+    default_contribution  suggested monthly deposit for the Projection tab (default: 300)"""
     wide, mapping, unmatched = read_statements(path, start_date)
     print("Detected rows:")
     for field, label in mapping.items():
@@ -589,4 +593,5 @@ def build_portfolio(path, start_date="2023-10-01", risk_free_annual=0.02, unreal
     if unmatched:
         print("Ignored rows (no pattern in ROW_PATTERNS):", [u[:40] for u in unmatched])
     return Portfolio(wide, mapping, unmatched, risk_free_annual=risk_free_annual,
-                     unrealised_is_balance=unrealised_is_balance)
+                     unrealised_is_balance=unrealised_is_balance,
+                     default_contribution=default_contribution)
