@@ -1,5 +1,5 @@
 """
-Trading dashboard (Dash + Plotly + dash-bootstrap-components) - analytics edition.
+Trading dashboard (Dash + Plotly + dash-bootstrap-components) - analytics edition (v2, logic fixes).
 
 Dependencies:
     pip install dash dash-bootstrap-components pandas plotly openpyxl numpy
@@ -8,6 +8,18 @@ Run:   python trading_dashboard.py            (uses the path in DEFAULT_EXCEL_FI
        python trading_dashboard.py "C:\\path\\to\\statements.xlsx"
 
 Tabs: Overview | Performance | Attribution | Income | Costs & cash | Risk | Behaviour | Projection | Data
+
+Changes (all logic fixes):
+  1. "Net deposited" line now includes the opening balance (capital_in), so equity - capital_in == cumulative P/L.
+  2. Projection "end below" probability now compares with break-even (today's equity + new deposits).
+  3. Profit-concentration insight drops the same month it names (best euro month).
+  4. IRR uses the same mid-month deposit timing as the Modified Dietz TWR.
+  5. Cash-drag estimate uses w*(R - rf)/(1 - w) instead of w*R.
+  6. Behaviour tab plots the PREVIOUS month's return against this month's deposit.
+  7. Unrealised P&L is auto-detected as balance vs monthly flow (override with UNREALISED_IS_BALANCE).
+  8. Income columns are de-duplicated and the detected column mapping is printed at start-up.
+  9. Income / fees totals in KPIs and insights exclude the first month (it has no baseline, as in attribution).
+ 10. Warning when statement months are missing (returns would span several months).
 """
 from pathlib import Path
 import sys
@@ -21,12 +33,15 @@ from plotly.subplots import make_subplots
 
 # =============================================================== CONFIG
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_EXCEL_FILE = BASE_DIR;
+DEFAULT_EXCEL_FILE = BASE_DIR / "Trading121 monthly statements december 2023-december 2024.xlsx"
 EXCEL_FILE = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXCEL_FILE
 START_DATE = "2023-10-01"
 GRAPH_HEIGHT = 520
-RISK_FREE_ANNUAL = 0.02     # used for Sharpe / Sortino. Set to your cash/T-bill rate.
+RISK_FREE_ANNUAL = 0.02     # used for Sharpe / Sortino / cash drag. Set to your cash/T-bill rate.
 N_SIMS = 3000               # Monte-Carlo paths in the Projection tab
+# Is the "unrealised" column a month-end BALANCE of open-position P&L (True), a monthly FLOW (False),
+# or should the script decide by reconciling against the equity curve (None)?
+UNREALISED_IS_BALANCE = None
 
 BG, GRID, FONT = "#2e2e2e", "#444444", "JetBrains Mono, monospace"
 C = dict(blue="#4C9BE8", green="#2ECC71", red="#E74C3C", gold="#F1C40F",
@@ -56,6 +71,14 @@ def load_data(path):
 
 df = load_data(EXCEL_FILE)
 
+# FIX 10: returns are computed row-to-row, so a missing month silently becomes a multi-month "return".
+full_idx = pd.date_range(df.index.min(), df.index.max(), freq="MS")
+HAS_GAPS = len(full_idx) != len(df)
+if HAS_GAPS:
+    _missing = [f"{t:%b-%y}" for t in full_idx.difference(df.index)]
+    print(f"WARNING: missing statement months ({', '.join(_missing)}). "
+          "Returns across a gap span several months and annualised figures will be off.")
+
 
 def find_col(keywords, exact=None, exclude=()):
     """Exact (case-insensitive) match first, then substring match."""
@@ -84,7 +107,10 @@ col_fees       = find_col(["commission", "fees"])
 if not col_equity:
     raise SystemExit(f"Could not find an equity column. Columns found: {list(df.columns)}")
 
-income_cols = [c for c in [col_dividends, col_cashback, col_interest, col_sharelend] if c]
+# FIX 8: the same column can match two keyword lists (e.g. share-lending interest) -> would be counted twice.
+income_cols = list(dict.fromkeys(c for c in [col_dividends, col_cashback, col_interest, col_sharelend] if c))
+print("Detected columns:", dict(equity=col_equity, deposits=col_deposits, realised=col_realised,
+                                unrealised=col_unrealised, fees=col_fees, cash=col_cash, income=income_cols))
 pretty = lambda c: c.replace("_", " ")
 INCOME_COLORS = {"dividend": C["gold"], "interest": C["blue"],
                  "cashback": C["green"], "lend": C["purple"]}
@@ -117,10 +143,11 @@ def mdiff(a, b):
     return (b.year - a.year) * 12 + b.month - a.month
 
 
-def monthly_irr(flows):
-    """Monthly internal rate of return by bisection (money-weighted return)."""
+def monthly_irr(flows, times=None):
+    """Monthly internal rate of return by bisection (money-weighted return).
+    `times` are flow dates in months (fractions allowed); default = 0, 1, 2, ..."""
     flows = np.asarray(flows, float)
-    t = np.arange(len(flows))
+    t = np.arange(len(flows), dtype=float) if times is None else np.asarray(times, float)
     npv = lambda rt: np.sum(flows / (1 + rt) ** t)
     lo, hi = -0.9, 1.0
     f_lo, f_hi = npv(lo), npv(hi)
@@ -166,20 +193,41 @@ perf_index = 1 + cum_ret
 perf_dd = perf_index / perf_index.cummax() - 1          # drawdown of performance only
 equity_dd = equity / equity.cummax() - 1                # raw equity drawdown
 
-net_dep = cf.cumsum()
-cum_profit = (equity - equity.iloc[0]) - (net_dep - cf.iloc[0])   # equity gain not explained by deposits
+net_dep = cf.cumsum()                                   # deposits only (first month included)
+# FIX 1: the opening balance was also put in by you; without it "equity - net deposited" overstates profit.
+base_capital = equity.iloc[0] - cf.iloc[0]
+capital_in = net_dep + base_capital                     # opening balance + all deposits
+cum_profit = equity - capital_in                        # == equity gain not explained by deposits
 
 # Euro profit implied by the equity curve itself (independent of reported P&L columns)
 monthly_pl = (equity - prev - cf).fillna(0.0)
 monthly_pl.iloc[0] = 0.0
 
-realised_unrealised = [c for c in [col_realised, col_unrealised] if c]
-df["Total_PL"] = df[realised_unrealised].sum(axis=1, min_count=1) if realised_unrealised else np.nan
-
-full_idx = pd.date_range(idx.min(), idx.max(), freq="MS")
 df_income = df[income_cols].reindex(full_idx).fillna(0) if income_cols else pd.DataFrame(index=full_idx)
 income_total = df_income.sum(axis=1).reindex(idx).fillna(0)
 fees_abs = df[col_fees].abs().reindex(idx).fillna(0) if col_fees else pd.Series(0.0, index=idx)
+
+# ---- FIX 7: is "unrealised" a balance (level) or a monthly flow? Reconcile against the equity curve.
+_real = df[col_realised].reindex(idx).fillna(0) if col_realised else pd.Series(0.0, index=idx)
+_unreal = df[col_unrealised].reindex(idx) if col_unrealised else None
+unreal_is_balance, recon_note = False, ""
+if col_realised and col_unrealised:
+    _u = _unreal.fillna(0)
+    gap_flow = (monthly_pl - (_real + _u + income_total - fees_abs)).iloc[1:].abs().median()
+    gap_bal = (monthly_pl - (_real + _u.diff().fillna(0) + income_total - fees_abs)).iloc[1:].abs().median()
+    if UNREALISED_IS_BALANCE is None:
+        unreal_is_balance = bool(np.isfinite(gap_bal) and (not np.isfinite(gap_flow) or gap_bal < gap_flow))
+    else:
+        unreal_is_balance = bool(UNREALISED_IS_BALANCE)
+    recon_note = (f"Reconciliation: median monthly gap between equity-implied P&L and realised + income - fees "
+                  f"+ unrealised is {gap_bal:,.2f} € if unrealised is a balance (its monthly change is used) "
+                  f"vs {gap_flow:,.2f} € if it is a monthly flow. Using: "
+                  f"{'change in unrealised' if unreal_is_balance else 'unrealised as reported'}"
+                  f"{' (forced in CONFIG)' if UNREALISED_IS_BALANCE is not None else ' (auto-detected)'}.")
+    print(recon_note)
+unreal_flow = None if _unreal is None else (_unreal.diff().fillna(0) if unreal_is_balance else _unreal)
+_pl_parts = [s for s in ((_real if col_realised else None), unreal_flow) if s is not None]
+df["Total_PL"] = pd.concat(_pl_parts, axis=1).sum(axis=1, min_count=1) if _pl_parts else np.nan
 
 x_min, x_max = idx.min(), idx.max()
 XRANGE = [(x_min - pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
@@ -206,6 +254,10 @@ n_months = len(r_m)
 years = n_months / 12
 rf_m = (1 + RISK_FREE_ANNUAL) ** (1 / 12) - 1
 
+# FIX 9: income / fees totals exclude month 1 so they line up with attribution and total profit.
+income_sum = income_total.iloc[1:].sum()
+fees_sum = fees_abs.iloc[1:].sum()
+
 total_profit = cum_profit.iloc[-1]
 twr_total = cum_ret.iloc[-1]
 cagr = (1 + twr_total) ** (1 / years) - 1 if years > 0 and (1 + twr_total) > 0 else np.nan
@@ -226,16 +278,18 @@ profit_factor = safe_div(gross_gain, gross_loss)
 longest_win, longest_loss, current_streak = streaks(r_m.values)
 var5 = np.percentile(r_m, 5) if n_months >= 5 else np.nan
 
-# money-weighted return (IRR) vs time-weighted: shows whether deposit timing helped
-_flows = np.zeros(len(idx))
-_flows[0] = -equity.iloc[0]
-_flows[1:] = -cf.iloc[1:].values
-_flows[-1] += equity.iloc[-1]
-_irr_m = monthly_irr(_flows)
+# FIX 4: money-weighted return (IRR) with the SAME timing assumption as the TWR (deposits mid-month).
+# Opening balance at t=0, deposit of month k at k-0.5, closing equity at the last month-end.
+_t, _f = [0.0], [-equity.iloc[0]]
+for _k in range(1, len(idx)):
+    _t.append(_k - 0.5)
+    _f.append(-cf.iloc[_k])
+_t.append(len(idx) - 1.0)
+_f.append(equity.iloc[-1])
+_irr_m = monthly_irr(_f, _t)
 mwr_ann = (1 + _irr_m) ** 12 - 1 if np.isfinite(_irr_m) else np.nan
 
 # ---- profit attribution (monthly, euros). Residual = open-position moves & anything not reported.
-_real = df[col_realised].reindex(idx).fillna(0) if col_realised else pd.Series(0.0, index=idx)
 attr = pd.DataFrame({
     "Realised P&L": _real,
     "Income": income_total,
@@ -315,12 +369,12 @@ def bar_colors(series):
 def fig_equity():
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32],
                         vertical_spacing=0.07)
-    fig.add_trace(go.Scatter(x=idx, y=net_dep, name="Net deposited",
+    fig.add_trace(go.Scatter(x=idx, y=capital_in, name="Capital in (opening balance + deposits)",
                              line=dict(color=C["grey"], dash="dot"), hovertemplate=EUR), 1, 1)
     fig.add_trace(go.Scatter(x=idx, y=equity, name="Equity", mode="lines+markers",
                              line=dict(color=C["blue"], width=3), fill="tonexty",
                              fillcolor="rgba(76,155,232,0.15)", hovertemplate=EUR), 1, 1)
-    fig.add_trace(go.Bar(x=idx, y=cum_profit, name="Cumulative P/L (equity − net deposits)",
+    fig.add_trace(go.Bar(x=idx, y=cum_profit, name="Cumulative P/L (equity − capital in)",
                          marker_color=bar_colors(cum_profit), hovertemplate=EUR), 2, 1)
     style(fig, "Equity vs money you put in", height=int(round(GRAPH_HEIGHT * 1.2)))
     fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False), row=1, col=1)
@@ -379,8 +433,9 @@ def fig_pl():
     if col_realised:
         fig.add_trace(go.Bar(x=idx, y=df[col_realised], name="Realised P&L",
                              marker_color=C["blue"], hovertemplate=EUR), secondary_y=False)
-    if col_unrealised:
-        fig.add_trace(go.Bar(x=idx, y=df[col_unrealised], name="Unrealised P&L",
+    if unreal_flow is not None:
+        fig.add_trace(go.Bar(x=idx, y=unreal_flow,
+                             name="Unrealised P&L (monthly change)" if unreal_is_balance else "Unrealised P&L",
                              marker_color=C["brown"], hovertemplate=EUR), secondary_y=False)
     fig.add_trace(go.Bar(x=idx, y=df["Total_PL"], name="Total P&L",
                          marker_color=C["teal"], hovertemplate=EUR), secondary_y=False)
@@ -689,46 +744,46 @@ def fig_rolling_risk():
     return fig
 
 
-def fig_return_vs_flow():
-    x, y = cf.iloc[1:], r_m * 100
+def _scatter_with_trend(x, y, labels, color, hover, title_stub, xtitle, ytitle):
+    """Shared scatter + OLS trend line + correlation in the title."""
     fig = go.Figure(go.Scatter(x=x, y=y, mode="markers", name="Months",
-                               marker=dict(size=11, color=C["blue"], line=dict(width=1, color="white")),
-                               text=[d.strftime("%b-%y") for d in x.index],
-                               hovertemplate="%{text}<br>deposit %{x:,.0f} €<br>return %{y:.2f}%<extra></extra>"))
+                               marker=dict(size=11, color=color, line=dict(width=1, color="white")),
+                               text=labels, hovertemplate=hover))
     corr = np.nan
-    if len(x) >= 4 and x.std() > 0 and y.std() > 0:
+    if len(x) >= 4 and np.std(x) > 0 and np.std(y) > 0:
         m, b = np.polyfit(x, y, 1)
-        xs = np.linspace(x.min(), x.max(), 20)
+        xs = np.linspace(np.min(x), np.max(x), 20)
         fig.add_trace(go.Scatter(x=xs, y=m * xs + b, mode="lines", name="Trend",
                                  line=dict(color=C["gold"], dash="dash"), hoverinfo="skip"))
         corr = np.corrcoef(x, y)[0, 1]
-    style(fig, f"Deposit size vs that month's return (corr {fnum(corr, '.2f')})",
-          ytitle="Return (%)", time_axis=False, hovermode="closest", height=380)
-    fig.update_xaxes(title_text="Deposit / withdrawal (€)")
+    style(fig, f"{title_stub} (corr {fnum(corr, '.2f')})", ytitle=ytitle,
+          time_axis=False, hovermode="closest", height=380)
+    fig.update_xaxes(title_text=xtitle)
     return fig
+
+
+def fig_return_vs_flow():
+    """Do you deposit more AFTER good months? previous month's return vs this month's deposit."""
+    x = r_m.shift(1).dropna() * 100          # previous month's return (index idx[2:])
+    y = cf.iloc[2:]                          # this month's deposit    (index idx[2:])
+    return _scatter_with_trend(
+        x.values, y.values, [d.strftime("%b-%y") for d in y.index], C["blue"],
+        "%{text}<br>previous month %{x:.2f}%<br>deposit %{y:,.0f} €<extra></extra>",
+        "Do good months trigger deposits? Previous return vs this month's deposit",
+        "Previous month's return (%)", "Deposit / withdrawal (€)")
 
 
 def fig_return_vs_lag():
     x, y = r_m.shift(1).dropna() * 100, r_m.iloc[1:] * 100
-    fig = go.Figure(go.Scatter(x=x, y=y, mode="markers", name="Months",
-                               marker=dict(size=11, color=C["purple"], line=dict(width=1, color="white")),
-                               text=[d.strftime("%b-%y") for d in y.index],
-                               hovertemplate="%{text}<br>prev %{x:.2f}%<br>this %{y:.2f}%<extra></extra>"))
-    corr = np.nan
-    if len(x) >= 4 and x.std() > 0 and y.std() > 0:
-        m, b = np.polyfit(x, y, 1)
-        xs = np.linspace(x.min(), x.max(), 20)
-        fig.add_trace(go.Scatter(x=xs, y=m * xs + b, mode="lines", name="Trend",
-                                 line=dict(color=C["gold"], dash="dash"), hoverinfo="skip"))
-        corr = np.corrcoef(x, y)[0, 1]
-    style(fig, f"Momentum check: previous vs this month (corr {fnum(corr, '.2f')})",
-          ytitle="This month (%)", time_axis=False, hovermode="closest", height=380)
-    fig.update_xaxes(title_text="Previous month (%)")
-    return fig
+    return _scatter_with_trend(
+        x.values, y.values, [d.strftime("%b-%y") for d in y.index], C["purple"],
+        "%{text}<br>prev %{x:.2f}%<br>this %{y:.2f}%<extra></extra>",
+        "Momentum check: previous vs this month",
+        "Previous month (%)", "This month (%)")
 
 
 def fig_deposit_timing():
-    """Cumulative deposits vs cumulative equity profit - were deposits made before gains or losses?"""
+    """Monthly deposits next to that month's return - visual check of deposit timing."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(x=idx, y=cf, name="Deposit / withdrawal", marker_color=C["orange"],
                          opacity=0.7, hovertemplate=EUR), secondary_y=False)
@@ -834,15 +889,15 @@ def signed_color(v):
 
 kpis_row1 = dbc.Row([
     kpi("Current equity", f"{equity.iloc[-1]:,.0f} €"),
-    kpi("Net deposited", f"{net_dep.iloc[-1]:,.0f} €"),
+    kpi("Capital in", f"{capital_in.iloc[-1]:,.0f} €", hint="Opening balance + all deposits/withdrawals since"),
     kpi("Profit / loss", f"{total_profit:+,.0f} €", signed_color(total_profit),
-        "Equity gain not explained by deposits"),
+        "Equity gain not explained by deposits (equity - capital in)"),
     kpi("Return (TWR)", fnum(twr_total * 100, ".1f", "%", plus=True), signed_color(twr_total),
         "Time-weighted, deposits removed"),
     kpi("Annualised (CAGR)", fnum(cagr * 100, ".1f", "%", plus=True), signed_color(cagr)),
     kpi("Money-weighted (ann.)", fnum(mwr_ann * 100, ".1f", "%", plus=True), signed_color(mwr_ann),
-        "IRR: also reflects the timing/size of your deposits"),
-    kpi("Income / Fees", f"{income_total.sum():,.0f} € / {fees_abs.sum():,.0f} €"),
+        "IRR (deposits mid-month, as in the TWR): also reflects the timing/size of your deposits"),
+    kpi("Income / Fees", f"{income_sum:,.0f} € / {fees_sum:,.0f} €", hint="Excludes the first month (no baseline)"),
 ], className="g-2 mb-2")
 
 kpis_row2 = dbc.Row([
@@ -867,8 +922,9 @@ def build_insights():
     if np.isfinite(gap) and abs(gap) >= 1:
         timing = (f" Your deposit timing {'added' if gap > 0 else 'cost'} about {abs(gap):.1f} pts a year "
                   f"(money-weighted {fnum(mwr_ann * 100, '.1f', '%')} vs time-weighted {fnum(cagr * 100, '.1f', '%')}).")
-    out.append(("Headline", f"{fnum(total_profit, ',.0f', ' €', plus=True)} profit on {net_dep.iloc[-1]:,.0f} € deposited "
-                            f"({fnum(twr_total * 100, '.1f', '%', plus=True)} excl. deposits over {n_months} months).{timing}",
+    out.append(("Headline", f"{fnum(total_profit, ',.0f', ' €', plus=True)} profit on {capital_in.iloc[-1]:,.0f} € "
+                            f"contributed (opening balance + deposits; "
+                            f"{fnum(twr_total * 100, '.1f', '%', plus=True)} excl. deposits over {n_months} months).{timing}",
                 signed_color(total_profit)))
 
     # 2) where equity growth came from
@@ -884,12 +940,12 @@ def build_insights():
                                f"(payoff {fnum(payoff, '.2f')}, profit factor {fnum(profit_factor, '.2f')}).",
                 C["green"] if np.isfinite(profit_factor) and profit_factor >= 1 else C["red"]))
 
-    # 4) concentration
+    # 4) concentration  (FIX 3: drop the SAME month that is named - the best euro month)
     if n_months >= 3 and total_profit > 0 and r_pl.max() > 0:
         best_d = r_pl.idxmax()
         share = r_pl.max() / total_profit * 100
-        ex_best = ((1 + r_m.drop(r_m.idxmax())).prod() - 1) * 100
-        out.append(("Profit concentration", f"{best_d:%b-%y} alone produced {share:.0f}% of total profit. Without the best "
+        ex_best = ((1 + r_m.drop(best_d)).prod() - 1) * 100
+        out.append(("Profit concentration", f"{best_d:%b-%y} alone produced {share:.0f}% of total profit. Without that "
                                             f"month the return would be {fnum(ex_best, '.1f', '%', plus=True)} instead of "
                                             f"{fnum(twr_total * 100, '.1f', '%', plus=True)}.", C["gold"]))
 
@@ -903,8 +959,8 @@ def build_insights():
                         f"Annualised volatility {fnum(vol_ann * 100, '.1f', '%')}, Sharpe {fnum(sharpe, '.2f')}.{rec_txt}",
                 C["red"] if cur_dd < -0.05 else C["blue"]))
 
-    # 6) income vs fees
-    inc, fee = income_total.sum(), fees_abs.sum()
+    # 6) income vs fees (FIX 9: excludes month 1, consistent with total profit)
+    inc, fee = income_sum, fees_sum
     if inc > 0 or fee > 0:
         cover = safe_div(inc, fee)
         yld = income_yield.iloc[1:].mean() * 12 if n_months else np.nan
@@ -913,19 +969,25 @@ def build_insights():
                                       f"Average income yield ≈ {fnum(yld, '.1f', '%')} per year on equity; income is "
                                       f"{fnum(safe_div(inc, total_profit) * 100, '.0f', '%')} of total profit.", C["gold"]))
 
-    # 7) cash
+    # 7) cash  (FIX 5: drag = w * (R - rf) / (1 - w))
     if cash_pct is not None:
+        w = cash_pct.mean() / 100
+        drag = (max(0.0, w * (cagr - RISK_FREE_ANNUAL) / (1 - w)) * 100
+                if np.isfinite(cagr) and np.isfinite(w) and w < 1 else np.nan)
         out.append(("Cash drag", f"Cash averaged {cash_pct.mean():.0f}% of equity (now {cash_pct.iloc[-1]:.0f}%). "
-                                 f"If the invested part earned your average return, idle cash cost roughly "
-                                 f"{fnum(max(0.0, cash_pct.mean() / 100 * max(cagr, 0) * 100) if np.isfinite(cagr) else np.nan, '.1f', ' pts/yr')} "
-                                 f"of annual return - a rough estimate, not a prediction.", C["teal"]))
+                                 f"Treating cash as earning the risk-free rate and the invested part as earning whatever "
+                                 f"lifts you to your CAGR, being fully invested would have added roughly "
+                                 f"{fnum(drag, '.1f', ' pts/yr')} - a rough estimate, not a prediction.", C["teal"]))
 
     # 8) streak
     out.append(("Streaks", f"Longest winning run {longest_win} month(s), longest losing run {longest_loss}. "
                            f"Currently {'on a ' + str(current_streak) + '-month winning run' if current_streak > 0 else 'on a ' + str(-current_streak) + '-month losing run' if current_streak < 0 else 'flat'}.",
                 C["purple"]))
 
-    # 9) caveat
+    # 9) data-quality / caveats
+    if HAS_GAPS:
+        out.append(("Data gap", "Some statement months are missing, so a few 'monthly' returns span several months; "
+                                "annualised figures are approximate.", C["orange"]))
     if n_months < 24:
         out.append(("Sample size", f"Only {n_months} monthly observations: ratios such as Sharpe, Sortino, skew and the "
                                    "projection are noisy. Treat them as descriptive, not predictive.", C["grey"]))
@@ -958,7 +1020,7 @@ monthly = pd.DataFrame({
     "cum_ret_pct": (cum_ret * 100).round(2).values,
     "dd_pct": (perf_dd * 100).round(2).values,
     "realised": (_real.round(2).values),
-    "unrealised": df[col_unrealised].round(2).values if col_unrealised else np.nan,
+    "unrealised": _unreal.round(2).values if _unreal is not None else np.nan,
     "income": income_total.round(2).values,
     "fees": fees_abs.round(2).values,
     "cash_pct": cash_pct.round(1).values if cash_pct is not None else np.nan,
@@ -966,7 +1028,7 @@ monthly = pd.DataFrame({
 monthly = monthly.replace({np.nan: None})
 MONTHLY_NAMES = {"month": "Month", "equity": "Equity €", "deposits": "Deposit €", "implied_pl": "P&L € (equity-implied)",
                  "ret_pct": "Return %", "cum_ret_pct": "Cum. return %", "dd_pct": "Drawdown %",
-                 "realised": "Realised €", "unrealised": "Unrealised €", "income": "Income €",
+                 "realised": "Realised €", "unrealised": "Unrealised € (as reported)", "income": "Income €",
                  "fees": "Fees €", "cash_pct": "Cash %"}
 
 
@@ -1080,6 +1142,7 @@ body {
     border-color: #444444 !important;
 }
 .note { font-size: 12px; color: #9AA0A6; line-height: 1.5; }
+.warn { font-size: 12px; color: #FFA726; line-height: 1.5; }
 """
 
 app = Dash(
@@ -1119,6 +1182,10 @@ header = dbc.Row([
             xs=12, sm=5, md=4, className="d-flex align-items-center justify-content-sm-end mt-2 mt-sm-0"),
 ], className="mb-3 pb-2 border-bottom border-secondary", align="center")
 
+gap_warning = (html.Div("Warning: some statement months are missing, so a few monthly returns span several months "
+                        "and annualised figures are approximate.", className="warn mb-2")
+               if HAS_GAPS else html.Div())
+
 income_controls = html.Div([
     html.Label("Period:", className="me-2 text-muted fw-bold", style={"fontFamily": FONT}),
     dbc.Select(
@@ -1150,6 +1217,7 @@ projection_controls = html.Div([
 
 app.layout = dbc.Container([
     header,
+    gap_warning,
     kpis_row1,
     kpis_row2,
     dbc.Tabs([
@@ -1170,6 +1238,7 @@ app.layout = dbc.Container([
                      "(price moves on open positions, FX, anything unreported). If your realised figure "
                      "is already net of fees, the fees bar double-counts and the remainder absorbs the difference.",
                      className="note mb-3"),
+            html.Div(recon_note, className="note mb-3") if recon_note else html.Div(),
             graph(fig_attr_monthly()),
             graph(fig_attr_cumulative()),
             graph(fig_win_loss_pl())),
@@ -1189,8 +1258,9 @@ app.layout = dbc.Container([
             dbc.Row([dbc.Col(table_return_stats(), xs=12, lg=6), dbc.Col(table_risk_stats(), xs=12, lg=6)],
                     className="g-4 mb-4")),
         tab("Behaviour", "t-behaviour",
-            html.Div("Do you deposit more after good or bad months, and does a good month predict the next one? "
-                     "With a small sample the correlations are weak evidence - look for obvious patterns only.",
+            html.Div("Left: do you deposit more after good or bad months (previous month's return vs this month's "
+                     "deposit)? Right: does a good month predict the next one? With a small sample the "
+                     "correlations are weak evidence - look for obvious patterns only.",
                      className="note mb-3"),
             graph(fig_deposit_timing()),
             row(fig_return_vs_flow(), fig_return_vs_lag())),
@@ -1207,8 +1277,9 @@ app.layout = dbc.Container([
             data_table()),
     ], active_tab="t-overview", className="mb-3"),
     html.Div("Methodology: returns are time-weighted (Modified Dietz, deposits assumed mid-month). "
-             "Money-weighted return is the IRR of month-end flows. Drawdown, volatility, Sharpe and Sortino "
-             "use monthly returns, annualised with √12. 'Equity-implied P&L' = Δequity − deposits.",
+             "Money-weighted return is the IRR with the same mid-month deposit timing. 'Capital in' = opening "
+             "balance + deposits. Drawdown, volatility, Sharpe and Sortino use monthly returns, annualised with "
+             "√12. 'Equity-implied P&L' = Δequity − deposits.",
              className="note mt-4 pb-3"),
 ], fluid=True, style={
     "backgroundColor": "#1f1f1f",
@@ -1271,8 +1342,8 @@ def update_projection(horizon, contrib):
         paths[:, h + 1] = paths[:, h] * (1 + sims[:, h]) + contrib
     p10, p50, p90 = np.percentile(paths, [10, 50, 90], axis=0)
     future = pd.date_range(idx[-1], periods=horizon + 1, freq="MS")
-    flat = equity.iloc[-1] + contrib * np.arange(horizon + 1)
-    invested_total = net_dep.iloc[-1] + contrib * horizon
+    flat = equity.iloc[-1] + contrib * np.arange(horizon + 1)      # 0% return line = break-even
+    total_contributed = capital_in.iloc[-1] + contrib * horizon
 
     fig = go.Figure([
         go.Scatter(x=idx, y=equity, name="History", mode="lines+markers",
@@ -1288,10 +1359,15 @@ def update_projection(horizon, contrib):
     style(fig, f"Bootstrap projection - next {horizon} months", ytitle="Equity (€)", time_axis=False)
     fig.update_xaxes(tickformat="%b-%y", tickangle=-45)
 
+    # FIX 2: compare with break-even (today's equity + new deposits), i.e. the grey line, and also with
+    # everything you will have put in (opening balance + all deposits).
     end = paths[:, -1]
-    p_loss = (end < invested_total).mean() * 100
+    p_below_flat = (end < flat[-1]).mean() * 100
+    p_below_capital = (end < total_contributed).mean() * 100
     text = (f"Median outcome {np.median(end):,.0f} € (10th–90th percentile {p10[-1]:,.0f} – {p90[-1]:,.0f} €). "
-            f"Total deposited would be {invested_total:,.0f} €; in {p_loss:.0f}% of simulations you end below it. "
+            f"In {p_below_flat:.0f}% of simulations you end below break-even from today "
+            f"({flat[-1]:,.0f} € = current equity + new deposits), and in {p_below_capital:.0f}% below the "
+            f"{total_contributed:,.0f} € you would have put in in total. "
             f"Resampled mean monthly return {rr.mean() * 100:+.2f}% · volatility {rr.std(ddof=1) * 100:.2f}%.")
     return fig, text
 
