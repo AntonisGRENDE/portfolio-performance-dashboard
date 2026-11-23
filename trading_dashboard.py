@@ -31,7 +31,7 @@ import sys
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, dash_table, Input, Output
+from dash import Dash, dcc, html, dash_table, Input, Output, State
 import dash_bootstrap_components as dbc
 from plotly.subplots import make_subplots
 
@@ -139,20 +139,14 @@ def bar_colors(series):
 
 # =============================================================== FIGURES - OVERVIEW
 def fig_equity():
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32],
-                        vertical_spacing=0.07)
+    fig = go.Figure()
     fig.add_trace(go.Scatter(x=idx, y=PF.capital_in, name="Capital in (opening balance + deposits)",
-                             line=dict(color=C["grey"], dash="dot"), hovertemplate=EUR), 1, 1)
+                             line=dict(color=C["grey"], dash="dot"), hovertemplate=EUR))
     fig.add_trace(go.Scatter(x=idx, y=PF.equity, name="Equity", mode="lines+markers",
                              line=dict(color=C["blue"], width=3), fill="tonexty",
-                             fillcolor="rgba(76,155,232,0.15)", hovertemplate=EUR), 1, 1)
-    fig.add_trace(go.Bar(x=idx, y=PF.cum_profit, name="Cumulative P/L (equity − capital in)",
-                         marker_color=bar_colors(PF.cum_profit), hovertemplate=EUR), 2, 1)
-    style(fig, "Equity vs money you put in", height=int(round(GRAPH_HEIGHT * 1.2)))
-    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False), row=1, col=1)
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08, bgcolor="#242424", bordercolor="#444444"), row=2, col=1)
-    fig.update_yaxes(title_text="Equity (€)", row=1, col=1)
-    fig.update_yaxes(title_text="Cum. P/L (€)", row=2, col=1)
+                             fillcolor="rgba(76,155,232,0.15)", hovertemplate=EUR))
+    style(fig, "Equity vs money you put in", ytitle="Equity (€)")
+    fig.update_xaxes(rangeselector=RANGESELECTOR, rangeslider=dict(visible=False))
     return fig
 
 
@@ -1031,7 +1025,7 @@ def networth_tab():
 tabs = [
     tab("Overview", "t-overview",
         insights_block,
-        graph(fig_equity()), graph(fig_composition()), graph(fig_returns()), graph(fig_cashflows())),
+        graph(fig_equity(), gid="graph-equity"), graph(fig_composition()), graph(fig_returns()), graph(fig_cashflows())),
     tab("Performance", "t-perf",
         graph(fig_growth_of_100()),
         graph(fig_pl()),
@@ -1196,6 +1190,100 @@ def update_projection(horizon, contrib):
 @app.callback(Output("dl-csv", "data"), Input("btn-csv", "n_clicks"), prevent_initial_call=True)
 def download_csv(_):
     return dcc.send_data_frame(monthly.rename(columns=MONTHLY_NAMES).to_csv, "monthly_summary.csv", index=False)
+
+
+app.clientside_callback(
+    """
+    function(relayoutData, figure) {
+        if (!relayoutData || !figure || !figure.data) {
+            return window.dash_clientside.no_update;
+        }
+
+        var hasY = ('yaxis.range[0]' in relayoutData) || ('yaxis.range' in relayoutData) || ('yaxis.autorange' in relayoutData);
+        var hasX = ('xaxis.range[0]' in relayoutData) || ('xaxis.range' in relayoutData) || ('xaxis.autorange' in relayoutData);
+        if (hasY && !hasX) {
+            return window.dash_clientside.no_update;
+        }
+
+        if (relayoutData['xaxis.autorange'] || relayoutData['autosize']) {
+            var newFig = JSON.parse(JSON.stringify(figure));
+            newFig.layout = newFig.layout || {};
+            newFig.layout.xaxis = newFig.layout.xaxis || {};
+            newFig.layout.yaxis = newFig.layout.yaxis || {};
+            newFig.layout.xaxis.autorange = true;
+            delete newFig.layout.xaxis.range;
+            newFig.layout.yaxis.autorange = true;
+            delete newFig.layout.yaxis.range;
+            return newFig;
+        }
+
+        var rawMin, rawMax;
+        if ('xaxis.range[0]' in relayoutData) {
+            rawMin = relayoutData['xaxis.range[0]'];
+            rawMax = relayoutData['xaxis.range[1]'];
+        } else if ('xaxis.range' in relayoutData) {
+            rawMin = relayoutData['xaxis.range'][0];
+            rawMax = relayoutData['xaxis.range'][1];
+        } else {
+            return window.dash_clientside.no_update;
+        }
+
+        var xMin = typeof rawMin === 'number' ? rawMin : new Date(rawMin).getTime();
+        var xMax = typeof rawMax === 'number' ? rawMax : new Date(rawMax).getTime();
+
+        if (isNaN(xMin) || isNaN(xMax)) {
+            return window.dash_clientside.no_update;
+        }
+
+        // Allow 15 days margin so points at monthly boundaries are included
+        var marginMs = 15 * 86400 * 1000;
+        var filterMin = xMin - marginMs;
+        var filterMax = xMax + marginMs;
+
+        var yVals = [];
+        figure.data.forEach(function(trace) {
+            if (!trace.x || !trace.y) return;
+            if (trace.visible === 'legendonly' || trace.visible === false) return;
+            for (var i = 0; i < trace.x.length; i++) {
+                var xv = trace.x[i];
+                var d = typeof xv === 'number' ? xv : new Date(xv).getTime();
+                if (!isNaN(d) && d >= filterMin && d <= filterMax) {
+                    var y = trace.y[i];
+                    if (typeof y === 'number' && !isNaN(y)) {
+                        yVals.push(y);
+                    }
+                }
+            }
+        });
+
+        if (yVals.length === 0) {
+            return window.dash_clientside.no_update;
+        }
+
+        var yMin = Math.min.apply(null, yVals);
+        var yMax = Math.max.apply(null, yVals);
+        var span = yMax - yMin;
+        var pad = span > 0 ? span * 0.08 : (Math.abs(yMax) * 0.08 || 1);
+
+        var newFig = JSON.parse(JSON.stringify(figure));
+        newFig.layout = newFig.layout || {};
+        newFig.layout.xaxis = newFig.layout.xaxis || {};
+        newFig.layout.yaxis = newFig.layout.yaxis || {};
+
+        newFig.layout.xaxis.range = [rawMin, rawMax];
+        newFig.layout.xaxis.autorange = false;
+
+        newFig.layout.yaxis.range = [yMin - pad, yMax + pad];
+        newFig.layout.yaxis.autorange = false;
+
+        return newFig;
+    }
+    """,
+    Output("graph-equity", "figure"),
+    Input("graph-equity", "relayoutData"),
+    State("graph-equity", "figure"),
+    prevent_initial_call=True
+)
 
 
 # =============================================================== RUN
